@@ -1,0 +1,4 @@
+"Name","SamAccountName","PasswordNeverExpires","LastLogonDate","Enabled","AuditCategory"
+"Administrator","Administrator","True","10/12/2026 3:16:48 PM","True","NonExpiringPassword"
+"Katleo K. Makhanya","Katleo","True","10/15/2026 9:37:59 AM","True","NonExpiringPassword"
+"AuditTest_ASREP","test_asrep",,,"True","ASREPRoastable"

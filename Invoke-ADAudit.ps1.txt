@@ -1,0 +1,123 @@
+<#
+.SYNOPSIS
+    Automated Active Directory Security Auditing and HTML/CSV Reporting Tool.
+.DESCRIPTION
+    Invoke-ADAudit queries Active Directory for credential hygiene, privileged group 
+    memberships, and Kerberos configuration exposures. Generates a styled HTML dashboard
+    and raw CSV reports.
+.PARAMETER OutputDir
+    Directory path where reports will be saved. Defaults to 'C:\AuditReports'.
+.EXAMPLE
+    .\Invoke-ADAudit.ps1 -OutputDir "C:\AuditReports"
+#>
+
+[CmdletBinding()]
+param (
+    [Parameter(Mandatory = $false)]
+    [string]$OutputDir = "C:\AuditReports"
+)
+
+# ----------------------------------------------------------------------
+# [1] ENVIRONMENT PREPARATION & INITIALIZATION
+# ----------------------------------------------------------------------
+Import-Module ActiveDirectory -ErrorAction Stop
+
+if (-not (Test-Path -Path $OutputDir)) {
+    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+}
+
+$TimeStamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+$HtmlPath  = Join-Path -Path $OutputDir -ChildPath "AD_Security_Audit_$TimeStamp.html"
+$CsvPath   = Join-Path -Path $OutputDir -ChildPath "AD_Audit_RawData_$TimeStamp.csv"
+$DaysStale = 90
+$CutoffDate = (Get-Date).AddDays(-$DaysStale)
+
+Write-Host "[*] Starting AD Security Audit at $(Get-Date)..." -ForegroundColor Cyan
+
+# ----------------------------------------------------------------------
+# [2] AUDIT AUDIT QUERIES
+# ----------------------------------------------------------------------
+
+# Query 1: Non-Expiring Passwords
+Write-Host "[+] Querying accounts with non-expiring passwords..." -ForegroundColor Yellow
+$NonExpiringUsers = Get-ADUser -Filter {PasswordNeverExpires -eq $true -and Enabled -eq $true} -Properties PasswordNeverExpires, LastLogonDate |
+    Select-Object Name, SamAccountName, PasswordNeverExpires, LastLogonDate, Enabled
+
+# Query 2: Inactive User Accounts (>90 Days)
+Write-Host "[+] Querying inactive user accounts (>$DaysStale days)..." -ForegroundColor Yellow
+$InactiveUsers = Get-ADUser -Filter {LastLogonDate -lt $CutoffDate -and Enabled -eq $true} -Properties LastLogonDate |
+    Select-Object Name, SamAccountName, LastLogonDate, Enabled
+
+# Query 3: Privileged Group Memberships
+Write-Host "[+] Querying privileged group memberships..." -ForegroundColor Yellow
+$PrivilegedGroups = @("Domain Admins", "Enterprise Admins", "Schema Admins", "Account Operators")
+$PrivilegedMembers = foreach ($Group in $PrivilegedGroups) {
+    if (Get-ADGroup -Filter {Name -eq $Group}) {
+        Get-ADGroupMember -Identity $Group -Recursive | 
+            Select-Object @{N='GroupName';E={$Group}}, Name, SamAccountName, ObjectClass
+    }
+}
+
+# Query 4: Kerberos Pre-Authentication Disabled (AS-REP Roasting Vulnerability)
+Write-Host "[+] Querying accounts vulnerable to AS-REP Roasting..." -ForegroundColor Yellow
+$ASREPRoastable = Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true -and Enabled -eq $true} -Properties DoesNotRequirePreAuth |
+    Select-Object Name, SamAccountName, DoesNotRequirePreAuth, Enabled
+
+# Query 5: User Accounts with Service Principal Names (Kerberoasting Exposure)
+Write-Host "[+] Querying user accounts with SPNs configured..." -ForegroundColor Yellow
+$Kerberoastable = Get-ADUser -Filter {ServicePrincipalName -like "*" -and Enabled -eq $true} -Properties ServicePrincipalName |
+    Where-Object { $_.SamAccountName -notlike "krbtgt" -and $_.ObjectClass -ne "msDS-GroupManagedServiceAccount" } |
+    Select-Object Name, SamAccountName, @{N='SPNs';E={$_.ServicePrincipalName -join "; "}}, Enabled
+
+# ----------------------------------------------------------------------
+# [3] HTML DASHBOARD GENERATION
+# ----------------------------------------------------------------------
+$CSS = @"
+<style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; color: #333; margin: 20px; }
+    h1 { color: #1a252f; border-bottom: 2px solid #3498db; padding-bottom: 8px; }
+    h2 { color: #2c3e50; margin-top: 25px; }
+    .summary-box { display: flex; gap: 15px; margin-bottom: 20px; }
+    .card { background: #fff; padding: 15px; border-radius: 6px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); width: 18%; text-align: center; }
+    .card h3 { margin: 0; font-size: 28px; color: #e74c3c; }
+    .card p { margin: 5px 0 0 0; font-size: 13px; color: #7f8c8d; font-weight: bold; }
+    table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 20px; border-radius: 4px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    th { background-color: #2c3e50; color: #ffffff; text-align: left; padding: 10px; font-size: 14px; }
+    td { padding: 8px 10px; border-bottom: 1px solid #ecf0f1; font-size: 13px; }
+    tr:nth-child(even) { background-color: #f8f9fa; }
+    .alert { color: #c0392b; font-weight: bold; }
+</style>
+"@
+
+$HeaderHTML = @"
+<h1>Active Directory Security Audit Report</h1>
+<p><strong>Generated On:</strong> $(Get-Date -Format "yyyy-MM-dd HH:mm:ss") | <strong>Domain:</strong> $((Get-ADDomain).DNSRoot)</p>
+<div class="summary-box">
+    <div class="card"><h3>$($NonExpiringUsers.Count)</h3><p>Non-Expiring Passwords</p></div>
+    <div class="card"><h3>$($InactiveUsers.Count)</h3><p>Inactive Accounts (>90d)</p></div>
+    <div class="card"><h3>$($PrivilegedMembers.Count)</h3><p>Privileged Memberships</p></div>
+    <div class="card"><h3>$($ASREPRoastable.Count)</h3><p>AS-REP Roastable</p></div>
+    <div class="card"><h3>$($Kerberoastable.Count)</h3><p>Kerberoastable Accounts</p></div>
+</div>
+"@
+
+$NonExpHTML  = $NonExpiringUsers | ConvertTo-Html -Fragment -PreContent "<h2>1. Non-Expiring Passwords</h2>"
+$InactiveHTML = $InactiveUsers    | ConvertTo-Html -Fragment -PreContent "<h2>2. Inactive Accounts (>90 Days)</h2>"
+$PrivHTML     = $PrivilegedMembers| ConvertTo-Html -Fragment -PreContent "<h2>3. Privileged Group Memberships</h2>"
+$ASREPHTML    = $ASREPRoastable   | ConvertTo-Html -Fragment -PreContent "<h2>4. AS-REP Roastable Accounts</h2>"
+$KerbHTML     = $Kerberoastable   | ConvertTo-Html -Fragment -PreContent "<h2>5. Kerberoastable User Accounts</h2>"
+
+# Assemble Document
+ConvertTo-Html -Head $CSS -Body "$HeaderHTML $NonExpHTML $InactiveHTML $PrivHTML $ASREPHTML $KerbHTML" | Out-File $HtmlPath
+
+# Export Combined Raw Data to CSV
+$CombinedResults = @()
+if ($NonExpiringUsers) { $CombinedResults += $NonExpiringUsers | Select-Object *, @{N='AuditCategory';E={'NonExpiringPassword'}} }
+if ($InactiveUsers)    { $CombinedResults += $InactiveUsers    | Select-Object *, @{N='AuditCategory';E={'InactiveAccount'}} }
+if ($ASREPRoastable)   { $CombinedResults += $ASREPRoastable   | Select-Object *, @{N='AuditCategory';E={'ASREPRoastable'}} }
+if ($Kerberoastable)   { $CombinedResults += $Kerberoastable   | Select-Object *, @{N='AuditCategory';E={'Kerberoastable'}} }
+$CombinedResults | Export-Csv -Path $CsvPath -NoTypeInformation
+
+Write-Host "[+] Audit complete! Output saved to:" -ForegroundColor Green
+Write-Host "    HTML: $HtmlPath" -ForegroundColor Gray
+Write-Host "    CSV:  $CsvPath" -ForegroundColor Gray

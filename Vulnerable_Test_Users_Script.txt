@@ -1,0 +1,28 @@
+# Define a stronger password meeting default Active Directory complexity policies
+$SecurePass = ConvertTo-SecureString "C0mplex#Audit2026!" -AsPlainText -Force
+
+# 1. Non-Expiring Password User
+New-ADUser -Name "AuditTest_NoExpire" `
+           -SamAccountName "test_noexp" `
+           -AccountPassword $SecurePass `
+           -Enabled $true `
+           -PasswordNeverExpires $true
+
+# 2. Account Vulnerable to AS-REP Roasting (Kerberos Pre-Auth Disabled)
+New-ADUser -Name "AuditTest_ASREP" `
+           -SamAccountName "test_asrep" `
+           -AccountPassword $SecurePass `
+           -Enabled $true
+
+# Set DoesNotRequirePreAuth flag post-creation
+Set-ADAccountControl -Identity "test_asrep" -DoesNotRequirePreAuth $true
+
+# 3. Account Vulnerable to Kerberoasting (User with SPN)
+New-ADUser -Name "AuditTest_Kerb" `
+           -SamAccountName "test_kerb" `
+           -AccountPassword $SecurePass `
+           -Enabled $true
+
+Set-ADUser -Identity "test_kerb" -ServicePrincipalNames @{Add="HTTP/webtest.domain.local"}
+
+Write-Host "[+] All 3 test AD accounts created successfully!" -ForegroundColor Green
